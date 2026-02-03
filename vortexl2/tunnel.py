@@ -12,7 +12,7 @@ from dataclasses import dataclass
 
 # L2TPv3 IDs per role
 TUNNEL_CONFIG = {
-    "OUTSIDE": {
+    "KHAREJ": {
         "tunnel_id": 2000,
         "peer_tunnel_id": 1000,
         "session_id": 20,

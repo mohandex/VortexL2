@@ -99,7 +99,16 @@ fi
 
 # Install Python dependencies
 echo -e "${YELLOW}[5/6] Installing Python dependencies...${NC}"
-pip3 install --quiet rich pyyaml
+# Try apt first (works on most systems), then fallback to pip
+apt-get install -y -qq python3-rich python3-yaml 2>/dev/null || {
+    echo -e "${YELLOW}Apt packages not available, trying pip...${NC}"
+    pip3 install --quiet --break-system-packages rich pyyaml 2>/dev/null || \
+    pip3 install --quiet rich pyyaml 2>/dev/null || {
+        echo -e "${RED}Failed to install Python dependencies${NC}"
+        echo -e "${YELLOW}Try manually: apt install python3-rich python3-yaml${NC}"
+        exit 1
+    }
+}
 
 # Create launcher script
 cat > "$BIN_PATH" << 'EOF'

@@ -39,7 +39,7 @@ sudo vortexl2
 ### 2. Select Your Role
 
 - **IRAN**: The server that receives connections and forwards ports
-- **OUTSIDE**: The remote tunnel endpoint (e.g., server outside Iran)
+- **KHAREJ**: The remote tunnel endpoint (e.g., server outside Iran)
 
 ### 3. Configure Endpoints
 
@@ -67,7 +67,7 @@ sudo vortexl2
 # 2. Configure endpoints (option 2)
 #    - Select role: IRAN
 #    - Enter Iran public IP: YOUR_IRAN_IP
-#    - Enter Outside public IP: YOUR_OUTSIDE_IP
+#    - Enter Outside public IP: YOUR_KHAREJ_IP
 #    - Iran l2tpeth0 IP: 10.30.30.1/30 (default)
 #    - Remote Forward IP: 10.30.30.2 (default)
 # 3. Create tunnel (option 3)
@@ -83,9 +83,9 @@ sudo vortexl2
 
 # 1. Install prerequisites (option 1)
 # 2. Configure endpoints (option 2)
-#    - Select role: OUTSIDE
+#    - Select role: KHAREJ
 #    - Enter Iran public IP: IRAN_SERVER_IP
-#    - Enter Outside public IP: YOUR_OUTSIDE_IP
+#    - Enter Outside public IP: YOUR_KHAREJ_IP
 # 3. Create tunnel (option 3)
 ```
 
@@ -195,7 +195,7 @@ forwarded_ports:
                     │  │10.30.30.2 │  │
                     │  └───────────┘  │
                     │                 │
-                    │ OUTSIDE Server  │
+                    │ KHAREJ Server  │
                     │   5.6.7.8       │
                     └─────────────────┘
 ```

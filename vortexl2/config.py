@@ -23,8 +23,7 @@ class Config:
     # Default values
     DEFAULTS = {
         "version": "1.0.0",
-        "user_id": None,
-        "role": None,  # "IRAN" or "OUTSIDE"
+        "role": None,  # "IRAN" or "KHAREJ"
         "ip_iran": None,
         "ip_kharej": None,
         "iran_iface_ip": "10.30.30.1/30",
@@ -49,11 +48,7 @@ class Config:
         for key, default in self.DEFAULTS.items():
             if key not in self._config:
                 self._config[key] = default
-        
-        # Generate user_id if not exists
-        if not self._config.get("user_id"):
-            self._config["user_id"] = str(uuid.uuid4())[:8].upper()
-            self._save()
+
     
     def _save(self) -> None:
         """Save configuration to file with secure permissions."""
@@ -72,18 +67,14 @@ class Config:
         self._save()
     
     @property
-    def user_id(self) -> str:
-        return self._config.get("user_id", "UNKNOWN")
-    
-    @property
     def role(self) -> Optional[str]:
         return self._config.get("role")
     
     @role.setter
     def role(self, value: str) -> None:
-        if value not in ("IRAN", "OUTSIDE", None):
-            raise ValueError("Role must be 'IRAN' or 'OUTSIDE'")
-        self._config["role"] = value
+        if value not in ("IRAN", "KHAREJ", None):
+            raise ValueError("Role must be 'IRAN' or 'KHAREJ'")
+        self._config["role"]  = value
         self._save()
     
     @property
@@ -145,11 +136,6 @@ class Config:
             ports.remove(port)
             self.forwarded_ports = ports
     
-    @staticmethod
-    def get_hostname() -> str:
-        """Get current system hostname."""
-        return socket.gethostname()
-    
     def is_configured(self) -> bool:
         """Check if basic configuration is complete."""
         return bool(
@@ -162,7 +148,7 @@ class Config:
         """Get local IP based on role."""
         if self.role == "IRAN":
             return self.ip_iran
-        elif self.role == "OUTSIDE":
+        elif self.role == "KHAREJ":
             return self.ip_kharej
         return None
     
@@ -170,7 +156,7 @@ class Config:
         """Get remote IP based on role."""
         if self.role == "IRAN":
             return self.ip_kharej
-        elif self.role == "OUTSIDE":
+        elif self.role == "KHAREJ":
             return self.ip_iran
         return None
     

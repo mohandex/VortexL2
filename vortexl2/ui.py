@@ -46,20 +46,22 @@ def show_banner(config: Config):
     clear_screen()
     
     role = config.role or "NOT SET"
-    role_color = "green" if config.role == "IRAN" else "cyan" if config.role == "OUTSIDE" else "yellow"
+    role_color = "green" if config.role == "IRAN" else "cyan" if config.role == "KHAREJ" else "yellow"
     
     banner_text = Text(ASCII_BANNER, style="bold cyan")
     
+    # Get server IP
+    server_ip = config.get_local_ip() or "Not configured"
+    
     info_lines = [
         f"[bold white]Version:[/] [cyan]{__version__}[/]",
-        f"[bold white]Hostname:[/] [yellow]{config.get_hostname()}[/]",
-        f"[bold white]User ID:[/] [magenta]{config.user_id}[/]",
+        f"[bold white]Server IP:[/] [yellow]{server_ip}[/]",
         f"[bold white]Role:[/] [{role_color}]{role}[/]",
     ]
     
     if config.is_configured():
         info_lines.append(f"[bold white]Iran IP:[/] [green]{config.ip_iran}[/]")
-        info_lines.append(f"[bold white]Outside IP:[/] [cyan]{config.ip_kharej}[/]")
+        info_lines.append(f"[bold white]Kharej IP:[/] [cyan]{config.ip_kharej}[/]")
     
     console.print(banner_text)
     console.print(Panel(
@@ -124,7 +126,7 @@ def prompt_role() -> Optional[str]:
     """Prompt user to select role."""
     console.print("\n[bold white]Select Server Role:[/]")
     console.print("  [bold cyan][1][/] IRAN (receives port forwards)")
-    console.print("  [bold cyan][2][/] OUTSIDE (remote tunnel endpoint)")
+    console.print("  [bold cyan][2][/] KHAREJ (remote tunnel endpoint)")
     console.print("  [bold cyan][0][/] Cancel")
     
     choice = Prompt.ask("\n[bold cyan]Select role[/]", default="0")
@@ -132,7 +134,7 @@ def prompt_role() -> Optional[str]:
     if choice == "1":
         return "IRAN"
     elif choice == "2":
-        return "OUTSIDE"
+        return "KHAREJ"
     return None
 
 
