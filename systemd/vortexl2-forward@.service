@@ -6,8 +6,8 @@ Documentation=https://github.com/iliya-Developer/VortexL2
 
 [Service]
 Type=simple
-# NOTE: REMOTE_IP is replaced by ForwardManager when installing the template
-ExecStart=/usr/bin/socat TCP4-LISTEN:%i,reuseaddr,fork TCP4:REMOTE_IP:%i
+# NOTE: {remote_ip} is replaced by ForwardManager when installing the template
+ExecStart=/usr/bin/socat TCP4-LISTEN:%i,reuseaddr,fork TCP4:{remote_ip}:%i
 Restart=always
 RestartSec=5
 StandardOutput=journal

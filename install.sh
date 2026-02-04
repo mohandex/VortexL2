@@ -74,12 +74,10 @@ EOF
 
 echo -e "${YELLOW}[4/6] Installing VortexL2...${NC}"
 
-# Backup existing installation
+# Always remove existing installation and reinstall fresh
 if [ -d "$INSTALL_DIR" ]; then
-    echo -e "${YELLOW}Backing up existing installation...${NC}"
-    BACKUP_DIR="${INSTALL_DIR}.backup.$(date +%Y%m%d%H%M%S)"
-    mv "$INSTALL_DIR" "$BACKUP_DIR"
-    echo -e "${CYAN}Backup saved to: ${BACKUP_DIR}${NC}"
+    echo -e "${YELLOW}Removing existing installation...${NC}"
+    rm -rf "$INSTALL_DIR"
 fi
 
 # Clone or download repository
