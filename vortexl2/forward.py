@@ -9,17 +9,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import json
 from pathlib import Path
 from typing import List, Tuple, Dict, Optional
 from dataclasses import dataclass, field
 from datetime import datetime
 
-
-# Setup logging
 logger = logging.getLogger(__name__)
 
-# Storage for forward servers
 FORWARDS_STATE_FILE = Path("/var/lib/vortexl2/forwards.json")
 FORWARDS_LOG_DIR = Path("/var/log/vortexl2")
 
@@ -30,16 +26,11 @@ class ForwardSession:
     port: int
     remote_ip: str
     remote_port: int
-    local_reader: Optional[asyncio.StreamReader] = None
-    local_writer: Optional[asyncio.StreamWriter] = None
-    remote_reader: Optional[asyncio.StreamReader] = None
-    remote_writer: Optional[asyncio.StreamWriter] = None
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     bytes_sent: int = 0
     bytes_received: int = 0
-    
-    def to_dict(self) -> Dict:
-        """Convert to dictionary for JSON storage."""
+
+    def to_dict(self) -> Dict[str, object]:
         return {
             "port": self.port,
             "remote_ip": self.remote_ip,
@@ -52,162 +43,149 @@ class ForwardSession:
 
 class ForwardServer:
     """Manages a single port forward server using asyncio."""
-    
-    def __init__(self, port: int, remote_ip: str, remote_port: int = None):
-        """
-        Initialize forward server.
-        
-        Args:
-            port: Local port to listen on
-            remote_ip: Remote IP to forward to
-            remote_port: Remote port (defaults to same as local port)
-        """
-        self.port = port
+
+    def __init__(self, port: int, remote_ip: str, remote_port: Optional[int] = None):
+        self.port = int(port)
         self.remote_ip = remote_ip
-        self.remote_port = remote_port or port
-        self.server: Optional[asyncio.Server] = None
+        self.remote_port = int(remote_port) if remote_port is not None else int(port)
+
+        self.server: Optional[asyncio.AbstractServer] = None
+        self.running: bool = False
         self.active_sessions: List[ForwardSession] = []
-        self.running = False
-        self.stats = {
+
+        self.stats: Dict[str, int] = {
             "connections": 0,
             "total_bytes_sent": 0,
             "total_bytes_received": 0,
             "errors": 0,
         }
-    
-    async def handle_client(self, local_reader: asyncio.StreamReader, 
-                          local_writer: asyncio.StreamWriter):
-        """Handle incoming client connection."""
-        client_addr = local_writer.get_extra_info('peername')
-        session = ForwardSession(
-            port=self.port,
-            remote_ip=self.remote_ip,
-            remote_port=self.remote_port
-        )
-        self.active_sessions.append(session)
-        self.stats["connections"] += 1
-        
+
+    async def _pipe(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
+                    session: ForwardSession, direction: str) -> None:
         try:
-            logger.info(f"Client connected from {client_addr} on port {self.port}")
-            
-            # Connect to remote server
-            try:
-                remote_reader, remote_writer = await asyncio.wait_for(
-                    asyncio.open_connection(self.remote_ip, self.remote_port),
-                    timeout=10
-                )
-            except asyncio.TimeoutError:
-                logger.error(f"Timeout connecting to {self.remote_ip}:{self.remote_port}")
-                local_writer.close()
-                await local_writer.wait_closed()
-                self.stats["errors"] += 1
-                return
-            except Exception as e:
-                logger.error(f"Failed to connect to {self.remote_ip}:{self.remote_port}: {e}")
-                local_writer.close()
-                await local_writer.wait_closed()
-                self.stats["errors"] += 1
-                return
-            
-            # Relay data in both directions
-            forward_task = asyncio.create_task(
-                self._relay_data(local_reader, remote_writer, session, "client->remote")
-            )
-            backward_task = asyncio.create_task(
-                self._relay_data(remote_reader, local_writer, session, "remote->client")
-            )
-            
-            # Wait for both tasks to complete
-            await asyncio.gather(forward_task, backward_task)
-            
-        except Exception as e:
-            logger.error(f"Error handling client {client_addr}: {e}")
-            self.stats["errors"] += 1
-        finally:
-            # Cleanup
-            if local_writer:
-                local_writer.close()
-                await local_writer.wait_closed()
-            self.active_sessions.remove(session)
-            logger.info(f"Client {client_addr} disconnected from port {self.port}")
-    
-    async def _relay_data(self, reader: asyncio.StreamReader, 
-                         writer: asyncio.StreamWriter,
-                         session: ForwardSession,
-                         direction: str):
-        """Relay data between two connections with optimized buffering."""
-        try:
-            # Use larger buffer size for better throughput (64KB instead of 4KB)
-            BUFFER_SIZE = 65536
-            drain_threshold = 262144  # 256KB - drain only when buffer gets large
-            pending_bytes = 0
-            
             while True:
-                data = await asyncio.wait_for(reader.read(BUFFER_SIZE), timeout=60)
+                data = await reader.read(65536)
                 if not data:
                     break
-                
-                # Update statistics
-                if "client->remote" in direction:
+
+                if direction == "client->remote":
                     session.bytes_sent += len(data)
                     self.stats["total_bytes_sent"] += len(data)
                 else:
                     session.bytes_received += len(data)
                     self.stats["total_bytes_received"] += len(data)
-                
+
                 writer.write(data)
-                pending_bytes += len(data)
-                
-                # Only drain periodically instead of after every write
-                if pending_bytes >= drain_threshold:
-                    await writer.drain()
-                    pending_bytes = 0
-            
-            # Final drain to ensure all data is sent
-            if pending_bytes > 0:
                 await writer.drain()
-        except asyncio.TimeoutError:
-            logger.debug(f"Timeout on {direction}")
         except Exception as e:
-            logger.debug(f"Error relaying {direction}: {e}")
+            logger.debug("Pipe error (%s) on port %s: %s", direction, self.port, e)
         finally:
-            writer.close()
-            await writer.wait_closed()
-    
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception:
+                pass
+
+    async def handle_client(self, local_reader: asyncio.StreamReader, local_writer: asyncio.StreamWriter) -> None:
+        client_addr = local_writer.get_extra_info("peername")
+        session = ForwardSession(port=self.port, remote_ip=self.remote_ip, remote_port=self.remote_port)
+        self.active_sessions.append(session)
+        self.stats["connections"] += 1
+
+        remote_reader: Optional[asyncio.StreamReader] = None
+        remote_writer: Optional[asyncio.StreamWriter] = None
+
+        try:
+            logger.info("Forward client %s connected on :%s -> %s:%s",
+                        client_addr, self.port, self.remote_ip, self.remote_port)
+
+            try:
+                remote_reader, remote_writer = await asyncio.wait_for(
+                    asyncio.open_connection(self.remote_ip, self.remote_port),
+                    timeout=10,
+                )
+            except asyncio.TimeoutError:
+                self.stats["errors"] += 1
+                logger.error("Timeout connecting to %s:%s for local port %s",
+                             self.remote_ip, self.remote_port, self.port)
+                return
+            except Exception as e:
+                self.stats["errors"] += 1
+                logger.error("Failed to connect to %s:%s for local port %s: %s",
+                             self.remote_ip, self.remote_port, self.port, e)
+                return
+
+            t1 = asyncio.create_task(self._pipe(local_reader, remote_writer, session, "client->remote"))
+            t2 = asyncio.create_task(self._pipe(remote_reader, local_writer, session, "remote->client"))
+            await asyncio.gather(t1, t2)
+
+        except Exception as e:
+            self.stats["errors"] += 1
+            logger.error("Error handling client %s on port %s: %s", client_addr, self.port, e)
+        finally:
+            # best-effort close
+            try:
+                local_writer.close()
+                await local_writer.wait_closed()
+            except Exception:
+                pass
+
+            try:
+                if remote_writer:
+                    remote_writer.close()
+                    await remote_writer.wait_closed()
+            except Exception:
+                pass
+
+            try:
+                self.active_sessions.remove(session)
+            except ValueError:
+                pass
+
+            logger.info("Forward client %s disconnected from :%s", client_addr, self.port)
+
     async def start(self) -> bool:
-        """Start the forward server."""
+        """Start the forward server (runs forever until stopped)."""
         try:
             self.server = await asyncio.start_server(
                 self.handle_client,
-                '0.0.0.0',
-                self.port,
-                reuse_address=True
+                host="0.0.0.0",
+                port=self.port,
+                reuse_address=True,
             )
             self.running = True
-            logger.info(f"Forward server started on port {self.port} -> {self.remote_ip}:{self.remote_port}")
-            
-            # Start serving
+            logger.info("Forward server listening on 0.0.0.0:%s -> %s:%s",
+                        self.port, self.remote_ip, self.remote_port)
+
             async with self.server:
                 await self.server.serve_forever()
+            return True
+        except asyncio.CancelledError:
+            # normal when daemon stops
+            return True
         except OSError as e:
-            logger.error(f"Failed to start server on port {self.port}: {e}")
             self.running = False
+            self.stats["errors"] += 1
+            logger.error("Failed to bind/listen on port %s: %s", self.port, e)
             return False
         except Exception as e:
-            logger.error(f"Server error on port {self.port}: {e}")
             self.running = False
+            self.stats["errors"] += 1
+            logger.error("Forward server error on port %s: %s", self.port, e)
             return False
-    
-    async def stop(self):
+
+    async def stop(self) -> None:
         """Stop the forward server."""
-        if self.server:
-            self.server.close()
-            await self.server.wait_closed()
         self.running = False
-        logger.info(f"Forward server stopped on port {self.port}")
-    
-    def get_status(self) -> Dict:
-        """Get server status."""
+        if self.server:
+            try:
+                self.server.close()
+                await self.server.wait_closed()
+            except Exception:
+                pass
+        logger.info("Forward server stopped on port %s", self.port)
+
+    def get_status(self) -> Dict[str, object]:
         return {
             "port": self.port,
             "remote": f"{self.remote_ip}:{self.remote_port}",
@@ -218,51 +196,46 @@ class ForwardServer:
 
 
 class ForwardManager:
-    """Manages all port forwarding servers."""
-    
+    """Manages all port forwarding servers for a single tunnel config."""
+
     def __init__(self, config):
         self.config = config
         self.servers: Dict[int, ForwardServer] = {}
-        self.event_loop: Optional[asyncio.AbstractEventLoop] = None
-        self.running_task: Optional[asyncio.Task] = None
-        
-        # Ensure log directory exists
+
+        # Ensure log dir exists (even if we don't write files here)
         FORWARDS_LOG_DIR.mkdir(parents=True, exist_ok=True)
-    
+        FORWARDS_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+
     def create_forward(self, port: int) -> Tuple[bool, str]:
-        """Create a port forward."""
-        remote_ip = self.config.remote_forward_ip
+        remote_ip = getattr(self.config, "remote_forward_ip", None)
         if not remote_ip:
             return False, "Remote forward IP not configured"
-        
+
+        port = int(port)
         if port in self.servers:
             return False, f"Port {port} already forwarding"
-        
-        # Create forward server
-        server = ForwardServer(port, remote_ip, remote_port=port)
-        self.servers[port] = server
-        
-        # Add to config
+
+        self.servers[port] = ForwardServer(port, remote_ip, remote_port=port)
+
+        # Persist in config
         self.config.add_port(port)
-        
         return True, f"Port forward for {port} created (-> {remote_ip}:{port})"
-    
+
     def remove_forward(self, port: int) -> Tuple[bool, str]:
-        """Remove a port forward."""
-        if port not in self.servers:
-            return False, f"Port {port} not found"
-        
-        # Server will be stopped when ForwardManager stops or specifically removed
-        del self.servers[port]
+        port = int(port)
+
+        # Remove server object (daemon will recreate from config if still present)
+        if port in self.servers:
+            del self.servers[port]
+
+        # Persist in config
         self.config.remove_port(port)
-        
         return True, f"Port forward for {port} removed"
-    
+
     def add_multiple_forwards(self, ports_str: str) -> Tuple[bool, str]:
-        """Add multiple port forwards from comma-separated string."""
-        results = []
-        ports = [p.strip() for p in ports_str.split(',') if p.strip()]
-        
+        results: List[str] = []
+        ports = [p.strip() for p in (ports_str or "").split(",") if p.strip()]
+
         for port_str in ports:
             try:
                 port = int(port_str)
@@ -270,14 +243,13 @@ class ForwardManager:
                 results.append(f"Port {port}: {msg}")
             except ValueError:
                 results.append(f"Port '{port_str}': Invalid port number")
-        
-        return True, "\n".join(results)
-    
+
+        return True, "\n".join(results) if results else "No ports provided"
+
     def remove_multiple_forwards(self, ports_str: str) -> Tuple[bool, str]:
-        """Remove multiple port forwards from comma-separated string."""
-        results = []
-        ports = [p.strip() for p in ports_str.split(',') if p.strip()]
-        
+        results: List[str] = []
+        ports = [p.strip() for p in (ports_str or "").split(",") if p.strip()]
+
         for port_str in ports:
             try:
                 port = int(port_str)
@@ -285,48 +257,50 @@ class ForwardManager:
                 results.append(f"Port {port}: {msg}")
             except ValueError:
                 results.append(f"Port '{port_str}': Invalid port number")
-        
-        return True, "\n".join(results)
-    
-    def list_forwards(self) -> List[Dict]:
+
+        return True, "\n".join(results) if results else "No ports provided"
+
+    def list_forwards(self) -> List[Dict[str, object]]:
         """List all configured port forwards with their status."""
-        forwards = []
-        
-        # Get actually listening ports from system
+        forwards: List[Dict[str, object]] = []
         listening_ports = self._get_listening_ports()
-        
-        for port in self.config.forwarded_ports:
+
+        remote_ip = getattr(self.config, "remote_forward_ip", None) or "-"
+
+        for port in getattr(self.config, "forwarded_ports", []):
+            port = int(port)
             is_running = port in listening_ports
-            
+
             if port in self.servers:
-                server = self.servers[port]
-                status = server.get_status()
-                status["running"] = is_running  # Override with actual state
+                status = self.servers[port].get_status()
+                # reflect actual system state
+                status["running"] = is_running
                 forwards.append(status)
             else:
                 forwards.append({
                     "port": port,
-                    "remote": f"{self.config.remote_forward_ip}:{port}",
+                    "remote": f"{remote_ip}:{port}",
                     "running": is_running,
                     "active_sessions": 0,
                 })
-        
+
         return forwards
-    
+
     def _get_listening_ports(self) -> set:
-        """Get set of ports that are actually listening on the system."""
+        """Best-effort: detect which ports this python process family is listening on."""
         import subprocess
+
         try:
             result = subprocess.run(
                 "ss -tlnp | grep python | grep -oP ':\\K[0-9]+(?=\\s)'",
                 shell=True,
                 capture_output=True,
                 text=True,
-                timeout=5
+                timeout=5,
             )
             if result.returncode == 0 and result.stdout.strip():
                 ports = set()
-                for line in result.stdout.strip().split('\n'):
+                for line in result.stdout.strip().split("\n"):
                     try:
                         ports.add(int(line.strip()))
                     except ValueError:
@@ -334,79 +308,53 @@ class ForwardManager:
                 return ports
         except Exception:
             pass
+
         return set()
-    
+
     async def start_all_forwards(self) -> Tuple[bool, str]:
-        """Start all configured port forwards asynchronously."""
-        results = []
-        tasks = []
-        
-        for port in self.config.forwarded_ports:
-            remote_ip = self.config.remote_forward_ip
-            
-            if port not in self.servers:
-                server = ForwardServer(port, remote_ip, remote_port=port)
-                self.servers[port] = server
-            else:
-                server = self.servers[port]
-            
-            if not server.running:
-                task = asyncio.create_task(server.start())
-                tasks.append((port, task))
-                results.append(f"Port {port}: starting...")
-        
-        if not results:
+        """Start all configured port forwards asynchronously (non-blocking)."""
+        results: List[str] = []
+        remote_ip = getattr(self.config, "remote_forward_ip", None)
+
+        if not getattr(self.config, "forwarded_ports", []):
             return True, "No port forwards configured"
-        
-        return True, "\n".join(results)
-    
-    async def stop_all_forwards(self) -> Tuple[bool, str]:
-        """Stop all configured port forwards asynchronously."""
-        results = []
-        tasks = []
-        
-        for port, server in self.servers.items():
+
+        if not remote_ip:
+            return False, "Remote forward IP not configured"
+
+        for port in self.config.forwarded_ports:
+            port = int(port)
+
+            if port not in self.servers:
+                self.servers[port] = ForwardServer(port, remote_ip, remote_port=port)
+
+            server = self.servers[port]
             if server.running:
-                task = asyncio.create_task(server.stop())
-                tasks.append((port, task))
-                results.append(f"Port {port}: stopping...")
-        
-        # Wait for all tasks
-        if tasks:
-            await asyncio.gather(*[task for _, task in tasks], return_exceptions=True)
-        
-        if not results:
-            return True, "No port forwards running"
-        
+                results.append(f"Port {port}: already running")
+                continue
+
+            # Start server task; it will run forever
+            asyncio.create_task(server.start())
+            results.append(f"Port {port}: starting...")
+
         return True, "\n".join(results)
-    
+
+    async def stop_all_forwards(self) -> Tuple[bool, str]:
+        """Stop all forward servers created in this manager."""
+        results: List[str] = []
+
+        tasks = []
+        for port, server in list(self.servers.items()):
+            if server.running:
+                tasks.append(server.stop())
+                results.append(f"Port {port}: stopping...")
+
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        return True, "\n".join(results) if results else "No port forwards running"
+
     async def restart_all_forwards(self) -> Tuple[bool, str]:
-        """Restart all configured port forwards."""
         await self.stop_all_forwards()
-        await asyncio.sleep(1)  # Brief pause between stop and start
+        await asyncio.sleep(1)
         return await self.start_all_forwards()
-    
-    def start_in_background(self) -> bool:
-        """Start all forwards in a background event loop."""
-        try:
-            import threading
-            
-            def run_loop():
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                self.event_loop = loop
-                
-                async def run_servers():
-                    await self.start_all_forwards()
-                    # Keep running
-                    while True:
-                        await asyncio.sleep(1)
-                
-                loop.run_until_complete(run_servers())
-            
-            thread = threading.Thread(target=run_loop, daemon=True)
-            thread.start()
-            return True
-        except Exception as e:
-            logger.error(f"Failed to start background forwards: {e}")
-            return False
